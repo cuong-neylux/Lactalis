@@ -1,4 +1,4 @@
-METHOD IF_BADI_CTE_FIN_POST_ADJ_DOC~ADJUST_POSTING_DOCUMENT.
+METHOD if_badi_cte_fin_post_adj_doc~adjust_posting_document.
 **********************************************************************
 * Importing
 *    IS_DOCUMENT_DATA   Type  CTE_S_FIN_POST_DOCUMENT
@@ -22,6 +22,10 @@ METHOD IF_BADI_CTE_FIN_POST_ADJ_DOC~ADJUST_POSTING_DOCUMENT.
   DATA lv_amount TYPE acbtr.
   DATA lv_sum TYPE acbtr.
   DATA wa_acccr LIKE LINE OF ct_acccr.
+  DATA wa_acccr_final LIKE LINE OF ct_acccr.
+  DATA wa_acccr_ca LIKE LINE OF ct_acccr.
+  DATA lv_amount_ca TYPE acbtr.
+  DATA lv_amount_final TYPE acbtr.
   DATA wa_accrel LIKE LINE OF ct_accrel.
   DATA lt_acccr TYPE cte_t_acccr.
   DATA lt_acccr_final TYPE cte_t_acccr.
@@ -31,154 +35,258 @@ METHOD IF_BADI_CTE_FIN_POST_ADJ_DOC~ADJUST_POSTING_DOCUMENT.
   DATA ls_accit TYPE accit.
   DATA lt_accrel_final TYPE cte_t_fin_post_entry_item_rel.
   DATA ls_accrel TYPE cte_s_fin_post_entry_item_rel.
-  DATA lv_line TYPE I.
+  DATA lv_line TYPE i.
   DATA lv_bschl TYPE bschl.
   DATA lv_lifnr TYPE lifnr.
+  DATA ls_doc TYPE cte_d_fin_pt_doc.
+  DATA ls_message LIKE LINE OF et_message.
+  DATA ls_message_line TYPE cte_s_t100_msg.
+  DATA ls_bkpf TYPE bkpf.
+  DATA lv_exchange_rate TYPE kursf.
+  DATA ls_allocation TYPE cte_s_fin_post_doc_allocation.
+  DATA ls_journal TYPE cte_s_fin_post_doc_journal.
+  DATA ls_tax TYPE cte_s_fin_post_doc_tax.
+  DATA lt_tax_guid TYPE cte_t_concur_node_id.
+  DATA lv_tax_guid TYPE cte_concur_node_id.
   FIELD-SYMBOLS: <fs_accit> TYPE accit.
   FIELD-SYMBOLS: <fs_acccr> TYPE acccr.
+  FIELD-SYMBOLS: <fs_acccr_final> TYPE acccr.
 
-  CLEAR: wa_add_data, wa_acccr, wa_accrel, lv_home_curr, wa_entry_add_data, wa_add_data.
+* Check if the expenses are domestic or foreign
+  READ TABLE is_document_data-additional_data INTO wa_add_data WITH KEY name = 'REPORT_CUSTOM1_VALUE'.
+  IF sy-subrc = 0.
+    IF wa_add_data-value = 'Internacional'.       " Internaltional expense
+      CLEAR: wa_add_data, wa_acccr, wa_accrel, lv_home_curr, wa_entry_add_data, wa_add_data.
+
 *     Convert lines that have EUR or USD currency
-  LOOP AT ct_acccr INTO wa_acccr.
+      LOOP AT ct_acccr INTO wa_acccr.
 *       firstly, ignore 1st line
-    IF sy-tabix = 1.
-      CONTINUE.
-    ENDIF.
-    CLEAR: lv_home_curr.
+        IF sy-tabix = 1.
+          CONTINUE.
+        ENDIF.
+        CLEAR: lv_home_curr.
 *       get home currency of current expense
-    lv_home_curr = wa_acccr-waers.
-    CLEAR: wa_accrel.
-    READ TABLE ct_accrel INTO wa_accrel WITH KEY posnr = wa_acccr-posnr.
-    IF sy-subrc = 0.
-      CLEAR: wa_entry.
-      READ TABLE is_document_data-entry INTO wa_entry WITH KEY entry_id = wa_accrel-entry_id.
-      IF sy-subrc = 0.
-        CLEAR: wa_entry_add_data, lv_tx_curr, lv_amount.
+        lv_home_curr = wa_acccr-waers.
+        CLEAR: wa_accrel.
+        READ TABLE ct_accrel INTO wa_accrel WITH KEY posnr = wa_acccr-posnr.
+        IF sy-subrc = 0.
+          CLEAR: wa_entry.
+          READ TABLE is_document_data-entry INTO wa_entry WITH KEY entry_id = wa_accrel-entry_id.
+          IF sy-subrc = 0.
+            CLEAR: wa_entry_add_data, lv_tx_curr, lv_amount.
 *           get transaction currency of current expense
 *        READ TABLE  wa_entry-additional_data INTO wa_entry_add_data WITH KEY name = 'ENTRY_CURR_ALPHACODE'.
-        READ TABLE  wa_entry-additional_data INTO wa_entry_add_data WITH KEY name = 'ENTRY_CURRENCY_CODE'.
-        IF sy-subrc = 0.
-          lv_tx_curr = wa_entry_add_data-VALUE.
-        ENDIF.
-        CLEAR: wa_entry_add_data.
+            READ TABLE  wa_entry-additional_data INTO wa_entry_add_data WITH KEY name = 'ENTRY_CURRENCY_CODE'.
+            IF sy-subrc = 0.
+              lv_tx_curr = wa_entry_add_data-value.
+            ENDIF.
+            CLEAR: wa_entry_add_data.
 *           get transaction amount of current expense
 *        READ TABLE  wa_entry-additional_data INTO wa_entry_add_data WITH KEY name = 'REPORT_ENTRY_TRANSACTION_AMOUNT'.
-        READ TABLE  wa_entry-additional_data INTO wa_entry_add_data WITH KEY name = 'REPORT_ENTRY_TRANSACTION_AMOUN'.
-        IF sy-subrc = 0.
-          lv_amount = wa_entry_add_data-VALUE.
-        ENDIF.
+
+            READ TABLE  wa_entry-additional_data INTO wa_entry_add_data WITH KEY name = 'REPORT_ENTRY_TRANSACTION_AMOUN'.
+            IF sy-subrc = 0.
+              lv_amount = wa_entry_add_data-value.
+            ENDIF.
+
 *           if home currency is different from transaction curr
 *           change the amount in ct_acccr
-        IF lv_tx_curr IS NOT INITIAL AND
-        lv_home_curr IS NOT INITIAL AND
-        lv_amount IS NOT INITIAL AND
-        lv_tx_curr <> lv_home_curr.
-          wa_acccr-waers = lv_tx_curr.
-          wa_acccr-wrbtr = lv_amount.
-          MODIFY ct_acccr FROM wa_acccr.
+
+            IF lv_tx_curr IS NOT INITIAL AND
+            lv_home_curr IS NOT INITIAL AND
+            lv_amount IS NOT INITIAL AND
+            lv_tx_curr <> lv_home_curr.
+
+* Check if there is an cash advance with the same amount
+              lv_amount_ca = - wa_acccr-wrbtr.
+              UNASSIGN <fs_acccr>.
+              READ TABLE ct_acccr ASSIGNING <fs_acccr> WITH KEY wrbtr = lv_amount_ca.
+              IF <fs_acccr> IS ASSIGNED.
+* Change the cash advance line
+                <fs_acccr>-waers = lv_tx_curr.
+                <fs_acccr>-wrbtr = - lv_amount.
+              ENDIF.
+
+              wa_acccr-waers = lv_tx_curr.
+              wa_acccr-wrbtr = lv_amount.
+              MODIFY ct_acccr FROM wa_acccr.
+            ENDIF.
+          ELSE.                 " Cash Advance that does not have the equal expense amount line
+            SELECT SINGLE * FROM cte_d_fin_pt_doc INTO ls_doc WHERE system_key = '1' AND document_type = 'AD' AND document_id = wa_accrel-alloc_id.
+            IF sy-subrc <> 0.
+              CLEAR: ls_message, ls_message_line.
+
+              ls_message-document_id = is_document_data-report_id.
+              ls_message-revision_id = is_document_data-report_key.
+              ls_message-entry_id = wa_accrel-entry_id.
+
+              ls_message_line-msgid = 'Z0F0001'.
+              ls_message_line-msgno = '000'.
+              ls_message_line-msgty = 'E'.
+              APPEND ls_message_line TO ls_message-messages.
+              APPEND ls_message TO et_message.
+            ENDIF.
+
+            SELECT SINGLE * FROM bkpf INTO ls_bkpf WHERE xblnr = ls_doc-doc_ref_key.
+            IF sy-subrc <> 0.
+              CLEAR: ls_message, ls_message_line.
+
+              ls_message-document_id = is_document_data-report_id.
+              ls_message-revision_id = is_document_data-report_key.
+              ls_message-entry_id = wa_accrel-entry_id.
+
+              ls_message_line-msgid = 'Z0F0001'.
+              ls_message_line-msgno = '001'.
+              ls_message_line-msgty = 'E'.
+              APPEND ls_message_line TO ls_message-messages.
+              APPEND ls_message TO et_message.
+            ENDIF.
+
+* Change the cash advance line
+            IF wa_acccr-waers <> ls_bkpf-waers.
+              lv_exchange_rate = ls_bkpf-kursf.
+              wa_acccr-waers = ls_bkpf-waers.
+
+              IF lv_exchange_rate IS NOT INITIAL.
+                wa_acccr-wrbtr = wa_acccr-wrbtr / lv_exchange_rate.
+              ENDIF.
+
+              MODIFY ct_acccr FROM wa_acccr.
+            ENDIF.
+          ENDIF.
         ENDIF.
-      ENDIF.
-    ENDIF.
-  ENDLOOP.
-  CLEAR: lt_acccr, lv_bschl.
-  CLEAR: lt_acccr_final, lt_accit_final, lt_accrel_final, lv_posnr, lv_lifnr, lv_amount.
-  lv_posnr = '0000000001'.
+      ENDLOOP.
+
+* Calculate the vendor line
+      CLEAR: lt_acccr, lv_bschl.
+      CLEAR: lt_acccr_final, lt_accit_final, lt_accrel_final, lv_posnr, lv_lifnr, lv_amount.
+      lv_posnr = '0000000001'.
 *     now, for lines that we have converted
 *     we need to add one more line for Kreditor per Curr
 *     for ct_acccr, ct_accit, ct_accrel
-  LOOP AT ct_acccr INTO wa_acccr.
-    CLEAR: ls_accit.
+      LOOP AT ct_acccr INTO wa_acccr.
+        CLEAR: ls_accit.
 *       get vendor id, booking key
-    READ TABLE ct_accit INTO ls_accit WITH KEY posnr = '0000000001'.
-    lv_lifnr = ls_accit-lifnr.
-    lv_bschl = ls_accit-bschl.
-    CLEAR: lv_sum.
-    READ TABLE lt_acccr_final WITH KEY waers = wa_acccr-waers TRANSPORTING NO FIELDS.
-    IF sy-subrc = 0.
-      CONTINUE.
-    ENDIF.
-*       select only wa_acccr-waers lines into lt_acccr
-    lt_acccr = ct_acccr.
-    DELETE lt_acccr WHERE waers <> wa_acccr-waers.
-    DELETE lt_acccr WHERE posnr = '0000000001'.
-    LOOP AT lt_acccr INTO ls_acccr.
-      lv_sum = lv_sum + ls_acccr-wrbtr.
-      lv_posnr = lv_posnr + 1.
-*         table ct_accit
-      READ TABLE ct_accit INTO ls_accit WITH KEY posnr = ls_acccr-posnr.
-      IF sy-subrc = 0.
-        ls_accit-posnr = lv_posnr.
-        APPEND ls_accit TO lt_accit_final.
-      ENDIF.
-*         table ct_accrel
-      READ TABLE ct_accrel INTO ls_accrel WITH KEY posnr = ls_acccr-posnr.
-      IF sy-subrc = 0.
-        ls_accrel-posnr = lv_posnr.
-        APPEND ls_accrel TO lt_accrel_final.
-      ENDIF.
-      ls_acccr-posnr = lv_posnr.
-      APPEND ls_acccr TO lt_acccr_final.
-    ENDLOOP.
-*       Add the creditor line
-    IF lv_posnr = ls_acccr-posnr.
-      DESCRIBE TABLE lt_acccr LINES lv_line.
-      ls_acccr = wa_acccr.
-      ls_acccr-wrbtr = 0 - lv_sum.
-      ls_acccr-posnr = lv_posnr - lv_line.
-      APPEND ls_acccr TO lt_acccr_final.
-*         table ct_accit
-      READ TABLE ct_accit INTO ls_accit WITH KEY posnr = wa_acccr-posnr.
-      IF sy-subrc = 0.
-        ls_accit-posnr = lv_posnr - lv_line.
-*           BEGIN of Insert - EXSVK - 122024 Adjust SHKZG and BSCHL according to vendor amount
-        IF ls_acccr-wrbtr < 0.
-          ls_accit-shkzg = 'H'.
-          ls_accit-bschl = '31'.
-        ELSE.
-          ls_accit-shkzg = 'S'.
-          ls_accit-bschl = '21'.
+        READ TABLE ct_accit INTO ls_accit WITH KEY posnr = '0000000001'.
+        lv_lifnr = ls_accit-lifnr.
+        lv_bschl = ls_accit-bschl.
+        CLEAR: lv_sum.
+        READ TABLE lt_acccr_final WITH KEY waers = wa_acccr-waers TRANSPORTING NO FIELDS.
+        IF sy-subrc = 0.
+          CONTINUE.
         ENDIF.
+*       select only wa_acccr-waers lines into lt_acccr
+        lt_acccr = ct_acccr.
+        DELETE lt_acccr WHERE waers <> wa_acccr-waers.
+        DELETE lt_acccr WHERE posnr = '0000000001'.
+        LOOP AT lt_acccr INTO ls_acccr.
+          lv_sum = lv_sum + ls_acccr-wrbtr.
+          lv_posnr = lv_posnr + 1.
+*         table ct_accit
+          READ TABLE ct_accit INTO ls_accit WITH KEY posnr = ls_acccr-posnr.
+          IF sy-subrc = 0.
+            ls_accit-posnr = lv_posnr.
+            APPEND ls_accit TO lt_accit_final.
+          ENDIF.
+*         table ct_accrel
+          READ TABLE ct_accrel INTO ls_accrel WITH KEY posnr = ls_acccr-posnr.
+          IF sy-subrc = 0.
+            ls_accrel-posnr = lv_posnr.
+            APPEND ls_accrel TO lt_accrel_final.
+          ENDIF.
+          ls_acccr-posnr = lv_posnr.
+          APPEND ls_acccr TO lt_acccr_final.
+        ENDLOOP.
+*       Add the creditor line
+        IF lv_posnr = ls_acccr-posnr.
+          DESCRIBE TABLE lt_acccr LINES lv_line.
+          ls_acccr = wa_acccr.
+          ls_acccr-wrbtr = 0 - lv_sum.
+          ls_acccr-posnr = lv_posnr - lv_line.
+
+* Prevent negative amount
+          IF ls_acccr-wrbtr > 0.
+* If the amount is positive, leave it as it is
+            APPEND ls_acccr TO lt_acccr_final.
+          ELSE.
+* If the amount is negative, add the negative amount to the suitable line
+            LOOP AT lt_acccr_final ASSIGNING <fs_acccr_final>.
+              IF <fs_acccr_final> IS ASSIGNED.
+                IF <fs_acccr_final>-wrbtr < 0.
+                  lv_amount_final = - <fs_acccr_final>-wrbtr.
+                  CLEAR wa_acccr_final.
+                  READ TABLE lt_acccr_final WITH KEY wrbtr = lv_amount_final TRANSPORTING NO FIELDS.
+                  IF sy-subrc <> 0.   " No expense line with the same amount exists
+* Add the negative amount to this line
+                    <fs_acccr_final>-wrbtr = <fs_acccr_final>-wrbtr + ls_acccr-wrbtr.
+                    EXIT.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+
+*         table ct_accit
+          READ TABLE ct_accit INTO ls_accit WITH KEY posnr = wa_acccr-posnr.
+          IF sy-subrc = 0.
+            ls_accit-posnr = lv_posnr - lv_line.
+*           BEGIN of Insert - EXSVK - 122024 Adjust SHKZG and BSCHL according to vendor amount
+            IF ls_acccr-wrbtr < 0.
+              ls_accit-shkzg = 'H'.
+              ls_accit-bschl = '31'.
+            ELSE.
+              ls_accit-shkzg = 'S'.
+              ls_accit-bschl = '21'.
+            ENDIF.
 *            ls_accit-bschl = lv_bschl.
 *           END of Insert - EXSVK - 122024 Adjust SHKZG and BSCHL according to vendor amount
-        ls_accit-lifnr = lv_lifnr.
-        CLEAR ls_accit-hkont.
-        APPEND ls_accit TO lt_accit_final.
-      ENDIF.
-*         table ct_accrel
-      READ TABLE ct_accrel INTO ls_accrel WITH KEY posnr = wa_acccr-posnr.
-      IF sy-subrc = 0.
-        ls_accrel-posnr = lv_posnr - lv_line.
-        APPEND ls_accrel TO lt_accrel_final.
-      ENDIF.
-      lv_posnr = lv_posnr + 1.
-    ENDIF.
-    CLEAR: ls_acccr.
-  ENDLOOP.
-  SORT lt_acccr_final BY posnr ASCENDING.
-  SORT lt_accit_final BY posnr ASCENDING.
-  SORT lt_accrel_final BY posnr ASCENDING.
-  REFRESH: ct_acccr, ct_accit, ct_accrel.
-  ct_acccr = lt_acccr_final.
-  ct_accit = lt_accit_final.
-  ct_accrel = lt_accrel_final.
-  CLEAR: lt_acccr_final, lt_accit_final, lt_accrel_final, lv_posnr,
-  ls_accrel, ls_accit, wa_acccr, lt_acccr, lv_bschl, lv_lifnr,
-  lv_home_curr, lv_tx_curr, wa_entry_add_data, wa_accrel, wa_acccr,
-  wa_entry.
+            ls_accit-lifnr = lv_lifnr.
+            CLEAR ls_accit-hkont.
+            IF ls_acccr-wrbtr > 0.
+              APPEND ls_accit TO lt_accit_final.
+            ENDIF.
 
-  LOOP AT ct_accit ASSIGNING <fs_accit>.
-    <fs_accit>-sgtxt = is_document_data-report_name.
-    <fs_accit>-zuonr = is_document_data-vendor_id.
-    <fs_accit>-xref3 = is_document_data-report_id.
-  ENDLOOP.
+          ENDIF.
+*         table ct_accrel
+          READ TABLE ct_accrel INTO ls_accrel WITH KEY posnr = wa_acccr-posnr.
+          IF sy-subrc = 0.
+            ls_accrel-posnr = lv_posnr - lv_line.
+            IF ls_acccr-wrbtr > 0.
+              APPEND ls_accrel TO lt_accrel_final.
+            ENDIF.
+          ENDIF.
+          lv_posnr = lv_posnr + 1.
+        ENDIF.
+        CLEAR: ls_acccr.
+      ENDLOOP.
+      SORT lt_acccr_final BY posnr ASCENDING.
+      SORT lt_accit_final BY posnr ASCENDING.
+      SORT lt_accrel_final BY posnr ASCENDING.
+      REFRESH: ct_acccr, ct_accit, ct_accrel.
+      ct_acccr = lt_acccr_final.
+      ct_accit = lt_accit_final.
+      ct_accrel = lt_accrel_final.
+      CLEAR: lt_acccr_final, lt_accit_final, lt_accrel_final, lv_posnr,
+      ls_accrel, ls_accit, wa_acccr, lt_acccr, lv_bschl, lv_lifnr,
+      lv_home_curr, lv_tx_curr, wa_entry_add_data, wa_accrel, wa_acccr,
+      wa_entry.
+
+      LOOP AT ct_accit ASSIGNING <fs_accit>.
+        <fs_accit>-sgtxt = is_document_data-report_name.
+        <fs_accit>-zuonr = is_document_data-vendor_id.
+        <fs_accit>-xref3 = is_document_data-report_id.
+      ENDLOOP.
 * neylux 03/2026: End of changes
+    ENDIF.
+  ENDIF.
 
 * neylux 05/2026: Freshdesk ticket 9893: Change VES to VED
   LOOP AT ct_acccr ASSIGNING <fs_acccr>.
-    IF <fs_acccr>-waers = 'VES'.
-      <fs_acccr>-waers = 'VED'.
+    IF <fs_acccr> IS ASSIGNED.
+      IF <fs_acccr>-waers = 'VES'.
+        <fs_acccr>-waers = 'VED'.
+      ENDIF.
     ENDIF.
   ENDLOOP.
 * neylux 05/2026: End of changes
-
 ENDMETHOD.

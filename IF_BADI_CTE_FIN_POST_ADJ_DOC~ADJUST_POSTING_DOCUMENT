@@ -205,10 +205,10 @@ METHOD if_badi_cte_fin_post_adj_doc~adjust_posting_document.
           ls_acccr-posnr = lv_posnr - lv_line.
 
 * Prevent negative amount
-          IF ls_acccr-wrbtr > 0.
+          IF ls_acccr-wrbtr > 0.  " Cash advance is higher than expense
 * If the amount is positive, leave it as it is
-            APPEND ls_acccr TO lt_acccr_final.
-          ELSE.
+*            APPEND ls_acccr TO lt_acccr_final.
+*          ELSE.
 * If the amount is negative, add the negative amount to the suitable line
             LOOP AT lt_acccr_final ASSIGNING <fs_acccr_final>.
               IF <fs_acccr_final> IS ASSIGNED.
